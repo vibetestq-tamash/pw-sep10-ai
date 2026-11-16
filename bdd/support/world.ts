@@ -1,7 +1,7 @@
-import { setWorldConstructor, World, IWorldOptions, After } from '@cucumber/cucumber';
+import { setWorldConstructor, World, IWorldOptions } from '@cucumber/cucumber';
 import { Browser, BrowserContext, Page, chromium } from 'playwright';
 
-export class LoginWorld extends World {
+export class HrmWorld extends World {
   browser!: Browser;
   context!: BrowserContext;
   page!: Page;
@@ -15,10 +15,10 @@ export class LoginWorld extends World {
     this.context = await this.browser.newContext();
     this.page = await this.context.newPage();
   }
+
+  async close() {
+    await this.browser?.close();
+  }
 }
 
-setWorldConstructor(LoginWorld);
-
-After(async function (this: LoginWorld) {
-  await this.browser?.close();
-});
+setWorldConstructor(HrmWorld);
