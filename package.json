@@ -10,7 +10,8 @@
     "report": "playwright show-report",
     "test:bdd": "tsx node_modules/@cucumber/cucumber/bin/cucumber.js --config bdd/cucumber.json",
     "test:bddpom": "tsx node_modules/@cucumber/cucumber/bin/cucumber.js --config bddpom/cucumber.json",
-    "test:psd": "tsx node_modules/@cucumber/cucumber/bin/cucumber.js --config psd/cucumber.json"
+    "test:psd": "tsx node_modules/@cucumber/cucumber/bin/cucumber.js --config psd/cucumber.json",
+    "test:psd:heal": "tsx psd/heal/orchestrator.ts"
   },
   "license": "UNLICENSED",
   "type": "commonjs",

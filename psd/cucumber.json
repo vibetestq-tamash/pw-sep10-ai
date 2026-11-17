@@ -1,7 +1,7 @@
 {
   "default": {
     "paths": ["psd/features/**/*.feature"],
-    "import": ["psd/support/world.ts", "psd/support/hooks.ts", "psd/steps/**/*.steps.ts"],
+    "import": ["psd/support/world.ts", "psd/support/hooks.ts", "psd/support/step-healer.ts", "psd/steps/**/*.steps.ts"],
     "format": [
       "progress",
       "html:psd/reports/cucumber-report.html",
@@ -13,10 +13,10 @@
       "baseUrl": "https://qtpsudhakar-vibetestq-hrm.up.railway.app/"
     },
     "retry": 0,
-    "parallel": 1
+    "parallel": 2
   },
   "files": {
-    "import": ["psd/support/world.ts", "psd/support/hooks.ts", "psd/steps/**/*.steps.ts"],
+    "import": ["psd/support/world.ts", "psd/support/hooks.ts", "psd/support/step-healer.ts", "psd/steps/**/*.steps.ts"],
     "format": [
       "progress",
       "html:psd/reports/cucumber-report.html",
@@ -28,6 +28,6 @@
       "baseUrl": "https://qtpsudhakar-vibetestq-hrm.up.railway.app/"
     },
     "retry": 0,
-    "parallel": 1
+    "parallel": 2
   }
 }

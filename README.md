@@ -141,6 +141,126 @@ Rules for a step file:
 - One browser for the whole run; each scenario gets a fresh context. The app URL comes from
   `worldParameters.baseUrl`, or the `AUT_BASE_URL` environment variable.
 
+### Healing run: execution, maintenance and defects in parallel (`psd/`)
+
+```bash
+npm run test:psd:heal                        # Run A with healing + the heal monitor
+npm run test:psd:heal -- --tags "@smoke"     # extra arguments go to Cucumber
+```
+
+Two parts work side by side:
+
+| Part | File | What it does |
+|---|---|---|
+| **Cucumber step healer** (inside Run A) | `psd/support/step-healer.ts` | When a step fails, Copilot (Claude Haiku 4.5, through the Copilot CLI) finds out why, finishes the step from the statement that failed, and proposes a corrected step definition file. The scenario continues. |
+| **Heal monitor** (beside Run A) | `psd/heal/orchestrator.ts` | Starts Run A, picks up each heal event as soon as it appears, verifies fixes and confirms defects with clean re-runs (at most 2 at a time), then writes the summary, one pull request and the trend history. |
+
+```
+Run A (healing on)                 Heal monitor (parallel)
+scenario 2 ✗ → healed ───────────► clean re-run of scenario 2 with the fix, healing off → ✅ verified / ❌ rejected
+scenario 4 ✗ → APPLICATION ──────► clean re-run of scenario 4 → still fails → GitHub issue (or "not reproduced")
+scenario 5 ✗ → Copilot gave up ──► 👀 manual review
+app not answering ───────────────► one environment issue, healing stopped
+Run A ends ──────────────────────► waits only for work in progress → summary, pull request, history
+```
+
+**The step healer, when a step fails:**
+1. **Evidence** is captured at once: screenshot, accessibility snapshot, URL, and the scenario's Playwright
+   trace (saved when the scenario ends). The screenshot is also attached to the HTML report.
+2. **Environment check**: if the app does not answer, healing stops for the run and one environment event
+   is emitted. No Copilot calls are spent on a broken environment.
+3. **Pinpoint and context**: the failing statement is found from the error stack. Copilot sees the step
+   function statement by statement (✓ executed, ✗ failed, · not executed), the feature file, the
+   scenario's step statuses, the parameters, every step definition file the scenario uses, the error and
+   the page as it was when the step failed:
+   ```
+    21 ✓   await firstNameInput(this).fill(firstName);
+    23 ✓   await saveButton(this).click();
+    26 ✗   await expect(personalDetailsHeading(this)).toBeVisible();   <-- FAILED HERE
+    27 ·   await expect(firstNameInput(this)).toHaveValue(firstName);
+   ```
+4. **Investigate**: Copilot can ask for read-only checks of the live page (snapshot, URL, or a locator's
+   count, visibility, text and value).
+5. **Verdict with a confidence (high, medium or low)**:
+   - **APPLICATION**: the app does not behave as the feature file says. The step fails.
+   - **STEP**: Copilot returns **RESUME** (the statements still to run, adapted to the current page) and
+     **FILE** (the corrected file). The file must compile and keep the same step texts and imports;
+     RESUME may not drop an assertion. RESUME runs now, so the step finishes without repeating what already
+     ran, and the rest of Run A uses the corrected definitions.
+   - No usable answer within `STEP_HEAL_CALLS`: **manual review**.
+
+The healer never writes step definition files; only fixes verified by the monitor are kept.
+
+**The heal monitor, per event:**
+
+| Event | Action | Result |
+|---|---|---|
+| healed | clean re-run of that scenario in a copy of `psd/` with the corrected file applied, healing off | ✅ **verified** (goes into the pull request) or ❌ **rejected** |
+| application | clean re-run of the scenario to confirm | 🐞 **issue** if it fails again, 〰️ **not reproduced** if it passes |
+| manual review | none | 👀 listed in the summary |
+| environment | none | 🌐 one environment issue |
+
+- **Issues** are labelled `app-defect` (confidence high) or `needs-triage` (medium or low). Each carries a
+  fingerprint (page, step and kind of error). If an open issue has the same fingerprint, it gets a comment
+  instead of a new issue. The issue includes the reason, the failed statement, the error, the page and
+  where to find the evidence.
+- **One pull request per run** contains every verified fix with its reason and changed lines. It is never
+  merged automatically.
+- **Trend history**: each run is added to `psd/heal-history/history.jsonl`, and
+  `psd/heal-history/dashboard.html` shows passed/failed per run, heals, verified and rejected fixes,
+  defects and Copilot calls.
+- Locally, issues and the pull request are only **drafted** under `psd/reports/heal-run/<run>/`
+  (`issues/`, `verified-fixes/`, `summary.md`). Set `STEP_HEAL_ISSUES=true` and `STEP_HEAL_PR=true` to
+  create them for real (needs `gh` signed in).
+
+**Run folder** `psd/reports/heal-run/<run>/`: `events/`, `evidence/<id>/` (screenshot, snapshot, trace,
+URL), `verify/<id>/rerun.log`, `step-heals.jsonl`, `summary.md`, `issues/`, `verified-fixes/`.
+
+**Unique test data and parallel scenarios**: `{{run}}` in a step parameter is replaced with 6 hex
+characters that are unique per run (derived from `RUN_ID`, otherwise random), e.g.
+`last name "Smith-{{run}}"`. This works for every run, with or without healing. OrangeHRM pre-fills the
+next Employee Id when the Add Employee form opens, so two employees added at the same moment would get the
+same id. The features therefore set it themselves with `And I enter employee id "A{{run}}"` (add) and
+`"E{{run}}"` (edit), and Cucumber runs 2 scenarios at a time (`"parallel": 2` in `psd/cucumber.json`).
+Clean re-runs get their own `RUN_ID`, so they never collide with Run A either.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `STEP_HEAL_MODEL` | `claude-haiku-4.5` | Copilot model |
+| `STEP_HEAL_CALLS` | `5` | Copilot calls per failing step, page checks and retries included |
+| `STEP_HEAL_MAX` | `5` | maximum healed steps per Cucumber process |
+| `STEP_HEAL_TIMEOUT_MS` | `300000` | step timeout while healing is on |
+| `STEP_HEAL_PARALLEL` | `2` | clean re-runs at the same time |
+| `STEP_HEAL_ISSUES` | off | `true` creates or comments GitHub issues |
+| `STEP_HEAL_PR` | off | `true` pushes a branch and opens the pull request |
+| `STEP_HEAL_DEBUG` | off | `true` keeps every Copilot prompt and reply in the run folder |
+| `COPILOT_GITHUB_TOKEN` | none | Copilot token in CI (locally your `copilot login` is used) |
+
+Scenarios tagged `@no-step-heal` are never healed. Short-lived messages such as toasts may be gone by
+the time Copilot looks, so it also relies on the error text.
+
+**Fix cache: the same failure is healed once.** A failure is identified by the step definition file,
+the step, the failing statement and the file's current content. Before asking Copilot, the healer looks
+for a known fix:
+
+| Where the fix comes from | Copilot call | Clean re-run |
+|---|---|---|
+| verified in an earlier run, not merged yet (`psd/heal-history/fixes.json`) | none | none: shown as ♻️ reused, and included in the pull request again |
+| found earlier in this run by any worker (`<run>/fixes/`) | none | shared with the first heal |
+| another worker is healing the same failure right now | none: it waits for that worker's fix | shared |
+| none of these | yes | yes |
+
+A cached fix must still pass on the real page (its RESUME runs as usual); if it does not, Copilot is asked
+and is shown the old fix as a hint. When the step file changes (the fix is merged, or someone edits the
+file), its cache entries no longer match and are removed at the next start. In GitHub Actions the cache
+is kept with the history.
+
+In GitHub Actions: **Actions → PSD heal run → Run workflow** (`.github/workflows/psd-heal-run.yml`,
+optional tag expression). It runs `npm run test:psd:heal` with issues and the pull request switched on,
+writes the summary to the job summary, keeps the history in the Actions cache, and uploads reports,
+evidence and the dashboard as the artifact `psd-step-heal-report`. It needs the `COPILOT_GITHUB_TOKEN`
+secret and **Settings → Actions → General → Allow GitHub Actions to create and approve pull requests**.
+
 ### VS Code
 
 `.vscode/settings.json` (local only, git-ignored) tells the Cucumber extension where the feature files
