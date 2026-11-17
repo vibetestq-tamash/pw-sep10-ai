@@ -1,3 +1,4 @@
+@smoke @employee
 Feature: Add employee
 
 Background:

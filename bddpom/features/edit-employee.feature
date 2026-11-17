@@ -1,3 +1,4 @@
+@regression @employee
 Feature: Edit employee
 
 Background:
