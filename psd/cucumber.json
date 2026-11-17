@@ -14,5 +14,20 @@
     },
     "retry": 0,
     "parallel": 1
+  },
+  "files": {
+    "import": ["psd/support/world.ts", "psd/support/hooks.ts", "psd/steps/**/*.steps.ts"],
+    "format": [
+      "progress",
+      "html:psd/reports/cucumber-report.html",
+      "json:psd/reports/cucumber-report.json",
+      "rerun:psd/reports/rerun.txt"
+    ],
+    "formatOptions": { "snippetInterface": "async-await" },
+    "worldParameters": {
+      "baseUrl": "https://qtpsudhakar-vibetestq-hrm.up.railway.app/"
+    },
+    "retry": 0,
+    "parallel": 1
   }
 }
