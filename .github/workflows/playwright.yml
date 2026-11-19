@@ -4,6 +4,8 @@
 #   Variable  APP_URL       e.g. https://qtpsudhakar-vibetestq-hrm.up.railway.app/
 #   Variable  APP_USER      login user name
 #   Secret    APP_PASSWORD  login password (never stored in the repo or a variable)
+#   Secret    SMTP_USERNAME Gmail address used to authenticate with smtp.gmail.com
+#   Secret    SMTP_PASSWORD Gmail App Password (not your account password) for SMTP auth
 
 name: Playwright E2E
 
@@ -86,3 +88,28 @@ jobs:
             git push origin gh-pages
           fi
           echo "Report: https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/$DEST/"
+
+      - name: Send failure report email
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "❌ Playwright E2E – ${{ github.repository }} (${{ github.ref_name }}) failed"
+          to: sudhakar@qtpsudhakar.com,sudhakar@vibetestq.com
+          from: tamash@vibetestq.com
+          body: |
+            Playwright E2E tests failed.
+
+            Repository  : ${{ github.repository }}
+            Branch      : ${{ github.ref_name }}
+            Commit      : ${{ github.sha }}
+            Triggered by: ${{ github.actor }}
+
+            Run details : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            The HTML report has been uploaded as a workflow artefact (retained 14 days) and,
+            for push/PR events, published at:
+            https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/main/

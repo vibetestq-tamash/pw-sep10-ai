@@ -55,7 +55,9 @@ const handled: Handled[] = [];
 const verifiedFixes = new Map<string, { content: string; events: HealEvent[] }>(); // file → corrected content
 const seen = new Set<string>();
 const queue: HealEvent[] = [];
-const verifications = new Map<string, Promise<{ passed: boolean; output: string }>>(); // one clean re-run per distinct failure
+/** Result of a clean re-run: the scenario's outcome and the status of the step the event is about. */
+interface Rerun { passed: boolean; output: string; step: string }
+const verifications = new Map<string, Promise<Rerun>>(); // one clean re-run per distinct failure
 const verifiedFixesFile = path.join(historyDir, 'fixes.json');
 let active = 0;
 let labelsReady = false;
@@ -132,17 +134,30 @@ async function handle(event: HealEvent): Promise<void> {
       const key = event.cacheKey ?? event.id;
       const shared = verifications.has(key);
       if (!shared) verifications.set(key, rerun(event, true));
-      const { passed, output } = await verifications.get(key)!;
-      if (!passed) return done('rejected', `clean re-run failed: ${lastError(output)}`);
+      let result = await verifications.get(key)!;
+      if (!shared && (result.step === 'skipped' || result.step === 'missing')) {
+        // an earlier step of the scenario failed in the re-run: wait for the other fixes of this run, then try once more
+        await Promise.allSettled([...verifications.entries()].filter(([k]) => k !== key).map(([, p]) => p));
+        result = await rerun(event, true);
+        if (result.step === 'skipped' || result.step === 'missing') {
+          return done('manual-review', `could not verify: an earlier step still fails in the clean re-run: ${lastError(result.output)}`);
+        }
+      }
+      const { passed, output, step } = result;
+      // the fix is judged on the healed step: other, unrelated failures later in the scenario do not reject it
+      if (step !== 'passed') return done('rejected', `the healed step ${step} in the clean re-run: ${lastError(output)}`);
       keep();
       if (!shared) rememberVerifiedFix(event);
       return done('verified', shared
         ? 'same fix as another worker — verified by that clean re-run'
-        : `clean re-run of ${event.feature}:${event.line} passed with the corrected ${event.file}`);
+        : passed
+          ? `clean re-run of ${event.feature}:${event.line} passed with the corrected ${event.file}`
+          : `the healed step passed in the clean re-run; the scenario still fails later: ${lastError(output)}`);
     }
     case 'application': {
-      const { passed, output } = await rerun(event, false);
-      if (passed) return done('not-reproduced', 'the scenario passed on a clean re-run — no issue raised');
+      const { output, step } = await rerun(event, false);
+      if (step === 'passed') return done('not-reproduced', 'the step passed on a clean re-run — no issue raised');
+      if (step !== 'failed') return done('not-reproduced', `the clean re-run did not reach the step (it was ${step}) — no issue raised: ${lastError(output)}`);
       const { outcome, link } = await raiseDefect(event, output);
       return done(outcome, `confirmed by a clean re-run (confidence ${event.confidence})`, link);
     }
@@ -217,7 +232,7 @@ function pruneVerifiedFixes(): void {
  * Re-runs one scenario from the start, healing off, in its own copy of psd/ — the original files plus
  * every fix verified so far, plus (for a healed event) this event's corrected file.
  */
-async function rerun(event: HealEvent, withFix: boolean): Promise<{ passed: boolean; output: string }> {
+async function rerun(event: HealEvent, withFix: boolean): Promise<Rerun> {
   const workspace = path.join(runDir, 'verify', event.id);
   for (const part of ['features', 'steps', 'support']) {
     fs.cpSync(path.join('psd', part), path.join(workspace, 'psd', part), { recursive: true });
@@ -226,7 +241,7 @@ async function rerun(event: HealEvent, withFix: boolean): Promise<{ passed: bool
   for (const [file, fix] of verifiedFixes) fs.writeFileSync(path.join(workspace, file), fix.content);
   if (withFix && event.file && event.corrected) fs.writeFileSync(path.join(workspace, event.file), event.corrected);
 
-  const args = [tsxCli, cucumberBin, '--config', 'psd/cucumber.json', '--profile', 'files', `${event.feature}:${event.line}`];
+  const args = [tsxCli, cucumberBin, '--config', 'psd/cucumber.json', '--profile', 'files', '--format', 'json:rerun.json', `${event.feature}:${event.line}`];
   return new Promise(resolve => {
     const child = spawn(process.execPath, args, {
       cwd: path.resolve(workspace),
@@ -237,9 +252,26 @@ async function rerun(event: HealEvent, withFix: boolean): Promise<{ passed: bool
     child.stderr.on('data', d => { output += d; });
     child.on('exit', code => {
       fs.writeFileSync(path.join(workspace, 'rerun.log'), output);
-      resolve({ passed: code === 0, output });
+      resolve({ passed: code === 0, output, step: stepStatus(workspace, event) });
     });
   });
+}
+
+/** Status of the event's step in the clean re-run (from its Cucumber JSON report). */
+function stepStatus(workspace: string, event: HealEvent): string {
+  const file = path.join(workspace, 'rerun.json');
+  if (!fs.existsSync(file)) return 'missing';
+  try {
+    const features = JSON.parse(fs.readFileSync(file, 'utf8')) as any[];
+    for (const feature of features) {
+      for (const element of feature.elements ?? []) {
+        if (element.type !== 'scenario' || element.line !== event.line) continue;
+        const step = (element.steps ?? []).find((s: any) => !s.hidden && s.name === event.step);
+        return step?.result?.status ?? 'missing';
+      }
+    }
+  } catch { /* unreadable report */ }
+  return 'missing';
 }
 
 function lastError(output: string): string {

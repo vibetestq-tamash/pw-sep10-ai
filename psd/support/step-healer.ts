@@ -53,6 +53,7 @@ const model = process.env.STEP_HEAL_MODEL ?? 'claude-haiku-4.5';
 const maxCalls = Number(process.env.STEP_HEAL_CALLS ?? 5);
 const maxHeals = Number(process.env.STEP_HEAL_MAX ?? 5);
 const stepTimeout = Number(process.env.STEP_HEAL_TIMEOUT_MS ?? 300000);
+const resumeActionTimeout = Number(process.env.STEP_HEAL_RESUME_ACTION_TIMEOUT_MS ?? 15000); // a wrong RESUME fails fast
 const eventsDir = process.env.STEP_HEAL_EVENTS_DIR;
 const runDir = eventsDir ? path.dirname(eventsDir) : path.join('psd', 'reports', 'step-heal');
 const logFile = path.join(runDir, 'step-heals.jsonl');
@@ -107,7 +108,8 @@ export interface HealEvent {
   fromCache?: 'run' | 'verified'; // healed with a fix found earlier in this run / verified in an earlier run
   verifiedInRun?: string;
 }
-type Probe = { probe: 'snapshot' } | { probe: 'url' } | { probe: 'locator'; method: string; args: unknown[] };
+type ProbeStep = { method: string; args?: unknown[] };
+type Probe = { probe: 'snapshot' } | { probe: 'url' } | { probe: 'locator'; method?: string; args?: unknown[]; chain?: ProbeStep[] };
 
 // ─── State ──────────────────────────────────────────────────────────────────
 
@@ -398,7 +400,12 @@ async function tryFix(
   const problem = validateFile(file, original, fix.corrected) ?? validateResume(fix.resume, source, fn, failedLine);
   if (problem) return `rejected: ${problem}`;
   try {
-    await compileResume(file, fix.corrected, fix.resume, fn).apply(w, args); // finish the step from where it failed
+    w.page.setDefaultTimeout(resumeActionTimeout);
+    try {
+      await compileResume(file, fix.corrected, fix.resume, fn).apply(w, args); // finish the step from where it failed
+    } finally {
+      w.page.setDefaultTimeout(30000); // the action timeout the world sets
+    }
     return undefined;
   } catch (e) {
     return `RESUME failed: ${firstLine(e as Error)}`;
@@ -529,11 +536,15 @@ async function prompt(
     '- RESUME: TypeScript statements that finish this step from the CURRENT page state — the FAILED statement',
     '  (corrected) and every statement after it, adapted if needed. It runs inside the step function: `this` is the',
     '  world (this.page), the step parameters are available by their names, and the locator consts and `expect`',
-    '  of the corrected FILE are in scope. Keep every expect(...) that had not passed yet.',
+    '  of the corrected FILE are in scope. Keep every expect(...) that had not passed yet. Write only the statements —',
+    '  never wrap them in Given/When/Then.',
     '- FILE: the complete corrected step definition file. Keep every step text (the strings in Given/When/Then) and',
     '  every import exactly as they are, keep the PSD style, use only roles/names/texts seen on the page, never',
     '  remove or weaken an expect(...), never change an expected value that comes from the step parameters, no',
     '  sleeps, no try/catch.',
+    '- Before answering STEP, PROBE every new or changed locator exactly as you will write it (use "chain" for',
+    '  chained locators). Propose it only when the probe returned count=1 and visible=true. If an element has no',
+    '  accessible name, scope it to a labelled container (e.g. its form group filtered by the label text).',
     '- CONFIDENCE: high when the evidence is unambiguous, medium when likely, low when you are unsure.',
     '',
     '## Answer format — exactly one of:',
@@ -541,6 +552,9 @@ async function prompt(
     'PROBES: [{"probe":"snapshot"},{"probe":"url"},{"probe":"locator","method":"getByRole","args":["heading",{"name":"Personal Details"}]}]',
     '   locator methods: getByRole, getByText, getByLabel, getByPlaceholder, getByTestId, locator (CSS).',
     '   Each locator probe returns count, visible, text and value of the first match.',
+    '   Chained locators use "chain", e.g. {"probe":"locator","chain":[{"method":"locator","args":[".oxd-input-group"]},',
+    '   {"method":"filter","args":[{"hasText":"Employee Id"}]},{"method":"getByRole","args":["textbox"]}]}',
+    '   (chain methods: the locator methods above, filter with hasText/hasNotText, first, last, nth).',
     'B) The application is at fault:',
     'VERDICT: APPLICATION', 'CONFIDENCE: high|medium|low', 'REASON: <one sentence>',
     'C) The step definition is at fault:',
@@ -556,20 +570,22 @@ async function prompt(
 function parse(answer: string): {
   probes?: Probe[]; verdict?: string; confidence: HealEvent['confidence']; reason: string; resume?: string; file?: string;
 } {
-  const verdict = /VERDICT:\s*(STEP|APPLICATION)/i.exec(answer)?.[1]?.toUpperCase();
-  const probeJson = /PROBES:\s*(\[[\s\S]*\])/.exec(answer)?.[1];
+  // fields only count at the start of a line (optionally in bold), never inside explanatory prose
+  const field = (name: string, value: string) => new RegExp(`^[ \\t>*_]*${name}[*_]*:[*_]*[ \\t]*${value}`, 'im');
+  const verdict = field('VERDICT', '(STEP|APPLICATION)\\b').exec(answer)?.[1]?.toUpperCase();
+  const probeJson = field('PROBES', '(\\[[\\s\\S]*\\])').exec(answer)?.[1];
   if (probeJson && !verdict) {
     try {
       const probes = JSON.parse(probeJson);
       if (Array.isArray(probes)) return { probes: probes.slice(0, 8), confidence: 'unknown', reason: '' };
     } catch { /* fall through */ }
   }
-  const confidence = (/CONFIDENCE:\s*(high|medium|low)/i.exec(answer)?.[1]?.toLowerCase() ?? 'unknown') as HealEvent['confidence'];
+  const confidence = (field('CONFIDENCE', '(high|medium|low)\\b').exec(answer)?.[1]?.toLowerCase() ?? 'unknown') as HealEvent['confidence'];
   const block = (name: string) => new RegExp(`${name}:\\s*\`\`\`(?:ts|typescript)?\\s*\\n([\\s\\S]*?)\`\`\``, 'i').exec(answer)?.[1];
   return {
     verdict,
     confidence,
-    reason: /REASON:\s*(.+)/i.exec(answer)?.[1]?.trim() ?? 'no reason given',
+    reason: field('REASON', '(.+)').exec(answer)?.[1]?.replace(/^[*_\s]+|[*_\s]+$/g, '') ?? 'no reason given',
     resume: block('RESUME'),
     file: block('FILE'),
   };
@@ -607,13 +623,14 @@ async function runProbes(page: Page, probes: Probe[]): Promise<string> {
       if (p.probe === 'snapshot') out.push(`snapshot:\n${(await page.locator('body').ariaSnapshot({ timeout: 5000 })).slice(0, 4000)}`);
       else if (p.probe === 'url') out.push(`url: ${page.url()}`);
       else if (p.probe === 'locator') {
-        const l = probeLocator(page, p.method, p.args);
+        const l = p.chain ? probeChain(page, p.chain) : probeLocator(page, p.method ?? '', p.args ?? []);
         const count = await l.count();
         const first = l.first();
         const visible = count ? await first.isVisible() : false;
         const text = count ? (await first.innerText({ timeout: 2000 }).catch(() => '')).slice(0, 200) : '';
         const value = count ? await first.inputValue({ timeout: 1000 }).catch(() => undefined) : undefined;
-        out.push(`${p.method}(${JSON.stringify(p.args).slice(1, -1)}): count=${count} visible=${visible} text=${JSON.stringify(text)}${value !== undefined ? ` value=${JSON.stringify(value)}` : ''}`);
+        const label = p.chain ? p.chain.map(c => `${c.method}(${JSON.stringify(c.args ?? []).slice(1, -1)})`).join('.') : `${p.method}(${JSON.stringify(p.args ?? []).slice(1, -1)})`;
+        out.push(`${label}: count=${count} visible=${visible} text=${JSON.stringify(text)}${value !== undefined ? ` value=${JSON.stringify(value)}` : ''}`);
       } else out.push(`unknown probe ${JSON.stringify(p)}`);
     } catch (e) {
       out.push(`${JSON.stringify(p)}: error ${firstLine(e as Error)}`);
@@ -622,14 +639,38 @@ async function runProbes(page: Page, probes: Probe[]): Promise<string> {
   return out.join('\n');
 }
 
-function probeLocator(page: Page, method: string, args: unknown[]): Locator {
+/** A chained locator, e.g. locator(".oxd-input-group").filter({hasText:"Employee Id"}).getByRole("textbox"). */
+function probeChain(page: Page, chain: ProbeStep[]): Locator {
+  if (!Array.isArray(chain) || !chain.length || chain.length > 6) throw new Error('chain must have 1 to 6 steps');
+  let current: Page | Locator = page;
+  for (const { method, args = [] } of chain) {
+    if (method === 'filter') {
+      const o = (args[0] ?? {}) as Record<string, unknown>;
+      const opts = Object.fromEntries(Object.entries(o).filter(([k, v]) => ['hasText', 'hasNotText'].includes(k) && typeof v === 'string'));
+      if (current === page) throw new Error('filter needs a locator before it');
+      current = (current as Locator).filter(opts);
+    } else if (['first', 'last'].includes(method)) {
+      if (current === page) throw new Error(`${method} needs a locator before it`);
+      current = method === 'first' ? (current as Locator).first() : (current as Locator).last();
+    } else if (method === 'nth') {
+      if (current === page || typeof args[0] !== 'number') throw new Error('nth needs a locator and a number');
+      current = (current as Locator).nth(args[0]);
+    } else {
+      current = probeLocator(current, method, args);
+    }
+  }
+  if (current === page) throw new Error('empty chain');
+  return current as Locator;
+}
+
+function probeLocator(page: Page | Locator, method: string, args: unknown[]): Locator {
   const [first, options] = args as [unknown, Record<string, unknown> | undefined];
   if (typeof first !== 'string') throw new Error('first argument must be a string');
   const opts = options && typeof options === 'object'
     ? Object.fromEntries(Object.entries(options).filter(([k, v]) => ['name', 'exact', 'level'].includes(k) && ['string', 'boolean', 'number'].includes(typeof v)))
     : undefined;
   switch (method) {
-    case 'getByRole': return page.getByRole(first as Parameters<Page['getByRole']>[0], opts);
+    case 'getByRole': return page.getByRole(first as Parameters<Page['getByRole']>[0], opts as Parameters<Page['getByRole']>[1]);
     case 'getByText': return page.getByText(first, opts);
     case 'getByLabel': return page.getByLabel(first, opts);
     case 'getByPlaceholder': return page.getByPlaceholder(first, opts);
@@ -716,6 +757,7 @@ function validateFile(file: string, original: string, corrected: string): string
 function validateResume(resume: string, source: string, fn: FnRange | undefined, failedLine: number | undefined): string | undefined {
   if (FORBIDDEN.test(resume)) return 'RESUME uses require/import()/process/fs/eval, which is not allowed';
   if (/\btry\s*\{|waitForTimeout|setTimeout/.test(resume)) return 'RESUME may not use try/catch or fixed waits';
+  if (/\b(Given|When|Then|defineStep)\s*\(/.test(resume)) return 'RESUME must be the statements themselves, not a Given/When/Then definition (a definition never runs)';
   if (fn && failedLine) {
     const remaining = lines(source).slice(failedLine - 1, fn.end).join('\n');
     const needed = (remaining.match(/expect\(/g) ?? []).length;

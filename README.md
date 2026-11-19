@@ -195,8 +195,8 @@ The healer never writes step definition files; only fixes verified by the monito
 
 | Event | Action | Result |
 |---|---|---|
-| healed | clean re-run of that scenario in a copy of `psd/` with the corrected file applied, healing off | ✅ **verified** (goes into the pull request) or ❌ **rejected** |
-| application | clean re-run of the scenario to confirm | 🐞 **issue** if it fails again, 〰️ **not reproduced** if it passes |
+| healed | clean re-run of that scenario in a copy of `psd/` with the corrected file applied, healing off | ✅ **verified** when the healed step passes (even if an unrelated later step still fails), ❌ **rejected** when it fails. If the re-run stopped at an earlier step, it waits for the run's other fixes and tries once more, else 👀 manual review |
+| application | clean re-run of the scenario to confirm | 🐞 **issue** when the same step fails again, 〰️ **not reproduced** otherwise |
 | manual review | none | 👀 listed in the summary |
 | environment | none | 🌐 one environment issue |
 
@@ -230,6 +230,7 @@ Clean re-runs get their own `RUN_ID`, so they never collide with Run A either.
 | `STEP_HEAL_CALLS` | `5` | Copilot calls per failing step, page checks and retries included |
 | `STEP_HEAL_MAX` | `5` | maximum healed steps per Cucumber process |
 | `STEP_HEAL_TIMEOUT_MS` | `300000` | step timeout while healing is on |
+| `STEP_HEAL_RESUME_ACTION_TIMEOUT_MS` | `15000` | action timeout while a proposed RESUME runs |
 | `STEP_HEAL_PARALLEL` | `2` | clean re-runs at the same time |
 | `STEP_HEAL_ISSUES` | off | `true` creates or comments GitHub issues |
 | `STEP_HEAL_PR` | off | `true` pushes a branch and opens the pull request |
